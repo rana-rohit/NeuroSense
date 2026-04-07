@@ -1,0 +1,29 @@
+data:
+  raw_path: "data/raw/DREAMER.mat"
+  processed_path: "data/processed/"
+  splits_path: "data/splits/"
+  sampling_rate_eeg: 128
+  sampling_rate_ecg: 256
+  segment_length: 4          # seconds per window
+  overlap: 2                 # seconds overlap between windows
+  norm_method: "zscore"      # zscore | minmax
+
+labels:
+  targets: ["valence", "arousal", "dominance"]
+  binarize: true
+  threshold: 3
+
+training:
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  optimizer: "adamw"         # adam | adamw | sgd
+  weight_decay: 0.0001
+  patience: 10               # early stopping patience
+  val_ratio: 0.2
+  seed: 42
+
+model:
+  type: "fusion"             # eegnet | cnn | cnnlstm | fusion
+  branch_dim: 128
+  dropout: 0.4

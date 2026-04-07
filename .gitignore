@@ -1,0 +1,23 @@
+data/raw/
+data/processed/
+outputs/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+*.mat
+*.pkl
+*.pt
+
+# Keep gitkeep, ignore everything else in outputs
+outputs/models/*.pt
+outputs/models/*.pkl
+outputs/logs/*.log
+outputs/results/*.png
+
+# Allow these
+!outputs/results/.gitkeep
+!outputs/models/.gitkeep
+!outputs/logs/.gitkeep
+!outputs/results/*.csv
+!outputs/results/*.json
