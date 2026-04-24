@@ -101,8 +101,8 @@ def hrv_frequency_domain(r_peaks: np.ndarray, fs: float = 256.0) -> np.ndarray:
     lf_mask  = (freqs >= 0.04) & (freqs < 0.15)
     hf_mask  = (freqs >= 0.15) & (freqs < 0.40)
 
-    lf_power = float(np.trapz(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
-    hf_power = float(np.trapz(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
+    lf_power = float(np.trapezoid(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
+    hf_power = float(np.trapezoid(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
     total    = lf_power + hf_power + 1e-10
     lf_hf    = lf_power / (hf_power + 1e-10)
 

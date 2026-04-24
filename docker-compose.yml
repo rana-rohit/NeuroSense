@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    container_name: emotion-platform-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist database and model checkpoints across container restarts
+      - ./outputs/platform:/app/outputs/platform
+      - ./outputs/models:/app/outputs/models
+      - ./outputs/results:/app/outputs/results
+      - ./outputs/logs:/app/outputs/logs
+    environment:
+      - MODEL_TYPE=fusion
+      # Uncomment and set these to load trained models:
+      # - MODEL_PATH_VALENCE=outputs/models/best_valence_FusionModel.pt
+      # - MODEL_PATH_AROUSAL=outputs/models/best_arousal_FusionModel.pt
+      # - MODEL_PATH_DOMINANCE=outputs/models/best_dominance_FusionModel.pt
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Optional: run with nginx for production TLS termination
+  # nginx:
+  #   image: nginx:alpine
+  #   ports:
+  #     - "443:443"
+  #     - "80:80"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/conf.d/default.conf
+  #     - ./certs:/etc/ssl/certs
+  #   depends_on:
+  #     - api

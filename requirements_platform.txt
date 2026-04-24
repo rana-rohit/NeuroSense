@@ -1,0 +1,42 @@
+# ── Emotion Intelligence Platform — Dependencies ──────────────────
+# Install with: pip install -r requirements_platform.txt
+
+# Core ML (inherited from requirements.txt)
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+scikit-learn>=1.3
+joblib>=1.3
+torch>=2.0
+mat73>=0.60
+h5py>=3.9
+pyyaml>=6.0
+tqdm>=4.65
+matplotlib>=3.7
+seaborn>=0.12
+
+# Platform — API layer
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.6.0
+
+# Platform — Storage + Analytics
+pyarrow>=15.0.0          # parquet export (optional, falls back to CSV)
+
+# Platform — HTTP client (testing + colab demo)
+requests>=2.31.0
+httpx>=0.27.0            # async test client for FastAPI
+
+# Platform — Testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0   # async endpoint tests
+
+# Platform — Optional: Colab public URL
+# pyngrok>=7.0.0         # install separately on Colab: pip install pyngrok
+
+# Platform — Optional: Postgres upgrade
+# psycopg2-binary>=2.9   # install when migrating from SQLite
+
+# Notebooks
+jupyter>=1.0
+ipywidgets>=8.0

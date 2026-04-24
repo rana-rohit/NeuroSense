@@ -1,0 +1,50 @@
+# ── Emotion Intelligence Platform Configuration ───────────────────
+
+platform:
+  name      : "Emotion Intelligence Platform"
+  version   : "1.0.0"
+  env       : "development"         # development | staging | production
+
+api:
+  host      : "0.0.0.0"
+  port      : 8000
+  reload    : true
+  log_level : "info"
+  cors_origins: ["*"]               # restrict in production
+
+storage:
+  db_path       : "outputs/platform/predictions.db"
+  parquet_path  : "outputs/platform/predictions.parquet"
+  export_on_shutdown: true
+
+models:
+  type: "fusion"                    # fusion | eegnet | rf | svm
+  paths:
+    valence  : "outputs/models/best_valence_FusionModel.pt"
+    arousal  : "outputs/models/best_arousal_FusionModel.pt"
+    dominance: "outputs/models/best_dominance_FusionModel.pt"
+  version: "1.0.0"
+
+pipeline:
+  min_signal_duration_sec : 5.0
+  quality_check           : true
+  fallback_baseline       : true    # use zero baseline if none provided
+
+insights:
+  max_per_request    : 5
+  trend_window       : 5            # sessions for trend detection
+  anomaly_z_threshold: 2.0
+  stability_cv_thresh: 0.10
+  correlation_thresh : 0.65
+  lookback_days      : 30
+
+# Inherits from configs/default.yaml
+data:
+  sampling_rate_eeg : 128
+  sampling_rate_ecg : 256
+  segment_length    : 4
+  overlap           : 2
+  norm_method       : "zscore"
+
+labels:
+  threshold: 3

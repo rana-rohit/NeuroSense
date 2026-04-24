@@ -1,0 +1,61 @@
+# ── Tuning-specific overrides ──────────────────────────────────────
+# Used by tuner.py and 06_tuning_colab.ipynb
+
+baseline_grid:
+  cv_folds : 5
+  scoring  : "roc_auc"
+  models   :
+    rf:
+      n_estimators     : [100, 200, 300]
+      max_depth        : [null, 10, 20, 30]
+      min_samples_split: [2, 5, 10]
+      max_features     : ["sqrt", "log2"]
+    svm:
+      C      : [0.1, 1.0, 10.0, 100.0]
+      gamma  : ["scale", "auto", 0.001, 0.01]
+      kernel : ["rbf", "linear"]
+    logreg:
+      C      : [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+    gbm:
+      n_estimators  : [100, 200, 300]
+      learning_rate : [0.01, 0.05, 0.1, 0.2]
+      max_depth     : [3, 4, 6]
+      subsample     : [0.7, 0.85, 1.0]
+
+optuna:
+  n_trials          : 30
+  n_epochs_per_trial: 20
+  early_stop_patience: 5
+  direction         : "maximize"
+  metric            : "roc_auc"
+  sampler           : "tpe"
+  pruner            : "median"
+  pruner_warmup     : 5
+  search_space:
+    lr:
+      type: log_float
+      low : 0.0001
+      high: 0.01
+    batch_size:
+      type   : categorical
+      choices: [16, 32, 64]
+    branch_dim:
+      type   : categorical
+      choices: [64, 128, 256]
+    dropout:
+      type: float
+      low : 0.2
+      high: 0.6
+    weight_decay:
+      type: log_float
+      low : 0.00001
+      high: 0.001
+    branch_type:
+      type   : categorical
+      choices: ["cnn", "cnnlstm"]
+    window_sec:
+      type   : categorical
+      choices: [2, 4]
+    n_epochs:
+      type   : categorical
+      choices: [15, 20, 25]

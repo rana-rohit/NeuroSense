@@ -132,12 +132,11 @@ class CachedDREAMERDataset(Dataset):
         weights = weights / weights.sum()
         w = torch.zeros(int(classes.max()) + 1)
         for i, c in enumerate(classes):
-            w[c] = weights[i]
+            w[c] = float(weights[i])
         return w
 
     def summary(self):
         labels = [s["label"] for s in self.samples]
-        n_pos  = sum(labels)
         n_neg  = len(labels) - n_pos
         print(f"  Target      : {self.target}")
         print(f"  Total wins  : {len(self.samples)}")
