@@ -32,30 +32,25 @@ LABEL_COLS     = ["valence", "arousal", "dominance"]
 # ── Loader ────────────────────────────────────────────────────────────────────
 def load_dreamer_mat(path: str) -> dict:
     """
-    Load DREAMER.mat file.
-
-    Args:
-        path: Absolute or relative path to DREAMER.mat
-
-    Returns:
-        dreamer: dict with keys EEG_SamplingRate, ECG_SamplingRate, Data, etc.
-
-    Raises:
-        FileNotFoundError: if path does not exist
-        RuntimeError: if loading fails
+    Load DREAMER.mat file (supports both v7.3 and older formats)
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"DREAMER.mat not found at: {path}")
 
     try:
-        if _MAT_LOADER == "mat73":
-            raw = mat73.loadmat(path)
-        else:
-            import scipy.io as sio
-            raw = sio.loadmat(path, simplify_cells=True)
+        import mat73
+        print("Trying mat73 loader...")
+        raw = mat73.loadmat(path)
+
+    except Exception:
+        print("mat73 failed, falling back to scipy.io.loadmat...")
+        import scipy.io as sio
+        raw = sio.loadmat(path, simplify_cells=True)
+
+    try:
         return raw["DREAMER"]
     except Exception as e:
-        raise RuntimeError(f"Failed to load DREAMER.mat: {e}")
+        raise RuntimeError(f"Invalid DREAMER structure: {e}")
 
 
 def get_subject_data(dreamer: dict, subject_idx: int) -> dict:
