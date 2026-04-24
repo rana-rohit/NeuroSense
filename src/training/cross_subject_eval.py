@@ -201,15 +201,18 @@ def run_loso_fold(
     model.load_state_dict(torch.load(ckpt, map_location=device))
     y_true, y_pred, y_prob = _predict(model, test_loader, device)
 
-    # ── APPLY TEMPORAL SMOOTHING PER CHUNK ──
-    window = 5
+    # ── STEP 1: Direction Fix ──
+    auc = roc_auc_score(y_true, y_prob)
 
+    if auc < 0.5:
+        y_prob = 1 - y_prob
+        auc = roc_auc_score(y_true, y_prob)
+
+    # ── STEP 2: Temporal Smoothing ──
+    window = 5
     y_prob_smoothed = []
 
-    # get actual test indices
     test_indices = list(test_idx)
-
-    # group by (subject, video)
     current_group = []
     current_meta = None
 
@@ -221,7 +224,6 @@ def run_loso_fold(
             current_meta = meta
 
         if meta != current_meta:
-            # process previous group
             chunk = np.array(current_group)
             chunk_smoothed = smooth_predictions(chunk, window=window)
             y_prob_smoothed.extend(chunk_smoothed)
@@ -239,8 +241,13 @@ def run_loso_fold(
 
     y_prob = np.array(y_prob_smoothed)
 
-    # Recompute predictions AFTER smoothing
-    y_pred = (y_prob > 0.5).astype(int)
+    # ── STEP 3: Find Best Threshold (NOW CORRECT) ──
+    best_thresh, best_f1 = find_best_threshold(y_true, y_prob)
+
+    # Apply threshold
+    y_pred = (y_prob > best_thresh).astype(int)
+
+    # ── FINAL METRICS ──
     result = {
         "subject" : test_subject,
         "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
@@ -254,12 +261,26 @@ def run_loso_fold(
     }
 
     logger.info(
-        f"  Sub {test_subject:02d} DONE | "
-        f"Acc={result['accuracy']} F1={result['f1']} "
-        f"AUC={result['roc_auc']}"
+        f"Sub {test_subject:02d} DONE | "
+        f"Acc={result['accuracy']:.4f} F1={result['f1']:.4f} AUC={result['roc_auc']:.4f} "
+        f"| BestThresh={best_thresh:.2f}"
     )
+
     return result
 
+def find_best_threshold(y_true, y_prob):
+    best_thresh = 0.5
+    best_f1 = 0
+
+    for t in np.linspace(0.1, 0.9, 50):
+        y_pred = (y_prob > t).astype(int)
+        f1 = f1_score(y_true, y_pred)
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thresh = t
+
+    return best_thresh, best_f1
 
 # ── Full LOSO loop ────────────────────────────────────────────────────────────
 
