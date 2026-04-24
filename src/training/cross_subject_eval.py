@@ -75,6 +75,10 @@ def _predict(model, loader, device):
         y_prob.extend(probs.cpu().numpy())
     return np.array(y_true), np.array(y_pred), np.array(y_prob)
 
+def smooth_predictions(probs, window=5):
+    if len(probs) < window:
+        return probs  # avoid edge crash
+    return np.convolve(probs, np.ones(window)/window, mode='same')
 
 def run_loso_fold(
     dataset     : DREAMERDataset,
@@ -197,6 +201,46 @@ def run_loso_fold(
     model.load_state_dict(torch.load(ckpt, map_location=device))
     y_true, y_pred, y_prob = _predict(model, test_loader, device)
 
+    # ── APPLY TEMPORAL SMOOTHING PER CHUNK ──
+    window = 5
+
+    y_prob_smoothed = []
+
+    # get actual test indices
+    test_indices = list(test_idx)
+
+    # group by (subject, video)
+    current_group = []
+    current_meta = None
+
+    for i, idx in enumerate(test_indices):
+        sample = dataset.samples[idx]
+        meta = (sample["subject"], sample["video"])
+
+        if current_meta is None:
+            current_meta = meta
+
+        if meta != current_meta:
+            # process previous group
+            chunk = np.array(current_group)
+            chunk_smoothed = smooth_predictions(chunk, window=window)
+            y_prob_smoothed.extend(chunk_smoothed)
+
+            current_group = []
+            current_meta = meta
+
+        current_group.append(y_prob[i])
+
+    # last group
+    if current_group:
+        chunk = np.array(current_group)
+        chunk_smoothed = smooth_predictions(chunk, window=window)
+        y_prob_smoothed.extend(chunk_smoothed)
+
+    y_prob = np.array(y_prob_smoothed)
+
+    # Recompute predictions AFTER smoothing
+    y_pred = (y_prob > 0.5).astype(int)
     result = {
         "subject" : test_subject,
         "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
