@@ -248,7 +248,7 @@ def run_loso_fold(
             current_meta = meta
 
         current_group.append(y_val_prob[i])  # ← INSIDE loop (FIXED)
-
+    
     # last group
     if current_group:
         chunk_smoothed = smooth_predictions(np.array(current_group))
