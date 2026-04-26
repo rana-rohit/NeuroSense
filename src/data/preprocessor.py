@@ -218,11 +218,20 @@ def process_trial(eeg_stim: np.ndarray, ecg_stim: np.ndarray,
     eeg_bf = preprocess_eeg(eeg_base, fs=eeg_fs)
     ecg_bf = preprocess_ecg(ecg_base, fs=ecg_fs)
 
-    # 2. Baseline correction
-    eeg_c = baseline_correction(eeg_f, eeg_bf)
-    ecg_c = baseline_correction(ecg_f, ecg_bf)
+    # ── NEW IMPROVED NORMALIZATION PIPELINE ──
 
-    # 3. Normalise
+    # 2. Normalize baseline separately (IMPORTANT)
+    eeg_bf_n = normalize_signal(eeg_bf, method=norm_method)
+    ecg_bf_n = normalize_signal(ecg_bf, method=norm_method)
+
+    eeg_f_n  = normalize_signal(eeg_f,  method=norm_method)
+    ecg_f_n  = normalize_signal(ecg_f,  method=norm_method)
+
+    # 3. Baseline correction (on normalized signals)
+    eeg_c = baseline_correction(eeg_f_n, eeg_bf_n)
+    ecg_c = baseline_correction(ecg_f_n, ecg_bf_n)
+
+    # 4. Final normalization (stabilize)
     eeg_n = normalize_signal(eeg_c, method=norm_method)
     ecg_n = normalize_signal(ecg_c, method=norm_method)
 
