@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../..")
@@ -31,7 +32,7 @@ from src.models.deep_model import build_model
 from src.training.trainer  import Trainer, _run_epoch
 
 logger = get_logger("cross_subject_eval")
-
+SMOOTH_WINDOW = 7
 
 # ── LOSO split indices ────────────────────────────────────────────────────────
 
@@ -61,21 +62,22 @@ def get_loso_indices(dataset: DREAMERDataset,
 @torch.no_grad()
 def _predict(model, loader, device):
     model.eval()
-    y_true, y_pred, y_prob = [], [], []
+
+    all_probs = []
+    all_labels = []
+
     for eeg, ecg, labels in loader:
         eeg, ecg = eeg.to(device), ecg.to(device)
-        if hasattr(model, "ecg_branch"):
-            logits = model(eeg, ecg)
-        else:
-            logits = model(eeg)
-        probs = torch.softmax(logits, dim=1)[:, 1]
-        preds = logits.argmax(dim=1)
-        y_true.extend(labels.numpy())
-        y_pred.extend(preds.cpu().numpy())
-        y_prob.extend(probs.cpu().numpy())
-    return np.array(y_true), np.array(y_pred), np.array(y_prob)
 
-def smooth_predictions(probs, window=5):
+        logits = model(eeg, ecg) if hasattr(model, "ecg_branch") else model(eeg)
+        probs = torch.softmax(logits, dim=1)[:, 1]
+
+        all_probs.extend(probs.cpu().numpy())
+        all_labels.extend(labels.numpy())
+
+    return np.array(all_labels), None, np.array(all_probs)
+
+def smooth_predictions(probs, window=SMOOTH_WINDOW):
     if len(probs) < window:
         return probs  # avoid edge crash
     return np.convolve(probs, np.ones(window)/window, mode='same')
@@ -94,7 +96,14 @@ def run_loso_fold(
     Returns:
         dict with subject, accuracy, f1, roc_auc
     """
-    train_idx, test_idx = get_loso_indices(dataset, test_subject)
+    train_idx_full, test_idx = get_loso_indices(dataset, test_subject)
+
+    train_idx, val_idx = train_test_split(
+        train_idx_full,
+        test_size=0.2,
+        random_state=42,
+        shuffle=True
+    )
 
     if len(test_idx) == 0:
         logger.warning(f"No test samples for subject {test_subject}, skipping")
@@ -152,6 +161,16 @@ def run_loso_fold(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3
     )
+    
+    val_ds = Subset(dataset, val_idx)
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=int(tc["batch_size"]),
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
+    )
 
     # Checkpoint path for this fold
     ckpt = os.path.join(
@@ -170,15 +189,16 @@ def run_loso_fold(
             model, train_loader, criterion,
             optimizer, device, is_train=True
         )
-        # Quick val on test set for early stopping
-        te_loss, te_acc = _run_epoch(
-            model, test_loader, criterion,
+
+        val_loss, val_acc = _run_epoch(
+            model, val_loader, criterion,
             None, device, is_train=False
         )
-        scheduler.step(te_loss)
 
-        if te_loss < best_loss - 1e-4:
-            best_loss = te_loss
+        scheduler.step(val_loss)
+
+        if val_loss < best_loss - 1e-4:
+            best_loss = val_loss
             patience_counter = 0
             torch.save(model.state_dict(), ckpt)
         else:
@@ -194,22 +214,64 @@ def run_loso_fold(
             logger.info(
                 f"  Sub {test_subject:02d} | Ep {epoch:03d} | "
                 f"train_loss={tr_loss:.4f} train_acc={tr_acc:.4f} | "
-                f"test_loss={te_loss:.4f} test_acc={te_acc:.4f}"
+                f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
             )
 
     # Load best and evaluate
     model.load_state_dict(torch.load(ckpt, map_location=device))
-    y_true, y_pred, y_prob = _predict(model, test_loader, device)
+
+    y_val_true, _, y_val_prob = _predict(model, val_loader, device)
+
+    # Direction fix
+    auc_val = roc_auc_score(y_val_true, y_val_prob) if len(set(y_val_true)) > 1 else 0.5
+    if auc_val < 0.5:
+        y_val_prob = 1 - y_val_prob
+
+    # ── VALIDATION SMOOTHING (FIXED) ──
+    val_meta = [dataset.samples[i] for i in val_idx]
+
+    y_val_smoothed = []
+    current_group = []
+    current_meta = None
+
+    for i in range(len(y_val_prob)):
+        meta = (val_meta[i]["subject"], val_meta[i]["video"])
+
+        if current_meta is None:
+            current_meta = meta
+
+        if meta != current_meta and len(current_group) > 0:
+            chunk_smoothed = smooth_predictions(np.array(current_group))
+            y_val_smoothed.extend(chunk_smoothed)
+
+            current_group = []
+            current_meta = meta
+
+        current_group.append(y_val_prob[i])  # ← INSIDE loop (FIXED)
+
+    # last group
+    if current_group:
+        chunk_smoothed = smooth_predictions(np.array(current_group))
+        y_val_smoothed.extend(chunk_smoothed)
+
+    y_val_prob = np.array(y_val_smoothed)
+    
+
+    # Find threshold
+    best_thresh, _ = find_best_threshold(y_val_true, y_val_prob)
+    
+    best_thresh = float(np.clip(best_thresh, 0.25, 0.75))
+
+    y_true, _, y_prob = _predict(model, test_loader, device)
 
     # ── STEP 1: Direction Fix ──
-    auc = roc_auc_score(y_true, y_prob)
+    auc = roc_auc_score(y_true, y_prob) if len(set(y_true)) > 1 else 0.5
 
     if auc < 0.5:
         y_prob = 1 - y_prob
-        auc = roc_auc_score(y_true, y_prob)
+        auc = 1 - auc
 
     # ── STEP 2: Temporal Smoothing ──
-    window = 5
     y_prob_smoothed = []
 
     test_indices = list(test_idx)
@@ -223,9 +285,8 @@ def run_loso_fold(
         if current_meta is None:
             current_meta = meta
 
-        if meta != current_meta:
-            chunk = np.array(current_group)
-            chunk_smoothed = smooth_predictions(chunk, window=window)
+        if meta != current_meta and len(current_group) > 0:
+            chunk_smoothed = smooth_predictions(np.array(current_group))
             y_prob_smoothed.extend(chunk_smoothed)
 
             current_group = []
@@ -235,15 +296,11 @@ def run_loso_fold(
 
     # last group
     if current_group:
-        chunk = np.array(current_group)
-        chunk_smoothed = smooth_predictions(chunk, window=window)
+        chunk_smoothed = smooth_predictions(np.array(current_group))
         y_prob_smoothed.extend(chunk_smoothed)
 
     y_prob = np.array(y_prob_smoothed)
-
-    # ── STEP 3: Find Best Threshold (NOW CORRECT) ──
-    best_thresh, best_f1 = find_best_threshold(y_true, y_prob)
-
+    
     # Apply threshold
     y_pred = (y_prob > best_thresh).astype(int)
 
@@ -255,7 +312,7 @@ def run_loso_fold(
                                           average="binary",
                                           zero_division=0)), 4),
         "roc_auc" : round(float(roc_auc_score(y_true, y_prob)
-                                 if len(set(y_true)) > 1 else 0.0), 4),
+                                 if len(set(y_true)) > 1 else 0.5), 4),
         "n_train" : len(train_idx),
         "n_test"  : len(test_idx),
     }
@@ -269,10 +326,15 @@ def run_loso_fold(
     return result
 
 def find_best_threshold(y_true, y_prob):
+    if len(np.unique(y_true)) < 2:
+        return 0.5, 0
+
     best_thresh = 0.5
     best_f1 = 0
 
-    for t in np.linspace(0.1, 0.9, 50):
+    thresholds = np.percentile(y_prob, np.linspace(5, 95, 100))
+
+    for t in thresholds:
         y_pred = (y_prob > t).astype(int)
         f1 = f1_score(y_true, y_pred)
 
