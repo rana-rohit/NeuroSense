@@ -7,6 +7,7 @@ Usage (script):
     python src/training/cross_subject_eval.py \
         --target valence \
         --model_type fusion \
+        --modality fusion \
         --config configs/default.yaml
 """
 
@@ -17,9 +18,9 @@ import json
 import numpy as np
 import torch
 import torch.nn as nn
+from collections import defaultdict
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../..")
@@ -32,7 +33,6 @@ from src.models.deep_model import build_model
 from src.training.trainer  import Trainer, _run_epoch
 
 logger = get_logger("cross_subject_eval")
-SMOOTH_WINDOW = 7
 
 # ── LOSO split indices ────────────────────────────────────────────────────────
 
@@ -77,10 +77,56 @@ def _predict(model, loader, device):
 
     return np.array(all_labels), None, np.array(all_probs)
 
-def smooth_predictions(probs, window=SMOOTH_WINDOW):
-    if len(probs) < window:
-        return probs  # avoid edge crash
-    return np.convolve(probs, np.ones(window)/window, mode='same')
+
+def find_best_threshold(y_true, y_prob):
+    if len(np.unique(y_true)) < 2:
+        return 0.5, 0
+
+    best_thresh = 0.5
+    best_f1 = 0
+
+    thresholds = np.percentile(y_prob, np.linspace(5, 95, 100))
+
+    for t in thresholds:
+        y_pred = (y_prob > t).astype(int)
+        f1 = f1_score(y_true, y_pred)
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thresh = t
+
+    return best_thresh, best_f1
+
+
+def _aggregate_by_video(y_true, y_prob, meta_list):
+    """
+    Group predictions by (subject, video) and average probabilities.
+
+    Args:
+        y_true    : array of true labels (per window)
+        y_prob    : array of predicted probabilities (per window)
+        meta_list : list of sample dicts with 'subject' and 'video' keys
+
+    Returns:
+        y_true_agg, y_prob_agg as numpy arrays (per video)
+    """
+    group_probs = defaultdict(list)
+    group_labels = {}
+
+    for i in range(len(y_true)):
+        key = (meta_list[i]["subject"], meta_list[i]["video"])
+        group_probs[key].append(y_prob[i])
+        group_labels[key] = y_true[i]
+
+    y_true_agg = []
+    y_prob_agg = []
+
+    for key in group_probs:
+        y_true_agg.append(group_labels[key])
+        y_prob_agg.append(np.mean(group_probs[key]))
+
+    return np.array(y_true_agg), np.array(y_prob_agg)
+
 
 def run_loso_fold(
     dataset     : DREAMERDataset,
@@ -89,6 +135,7 @@ def run_loso_fold(
     config      : dict,
     device      : torch.device,
     checkpoint_dir: str = "outputs/models",
+    modality    : str = "fusion",
 ) -> dict:
     """
     Train and evaluate one LOSO fold.
@@ -98,21 +145,21 @@ def run_loso_fold(
     """
     train_idx_full, test_idx = get_loso_indices(dataset, test_subject)
 
-    train_idx, val_idx = train_test_split(
-        train_idx_full,
-        test_size=0.2,
-        random_state=42,
-        shuffle=True
-    )
+    # ── Subject-level validation split (deterministic per fold) ──
+    train_subjects_all = sorted(set(
+        dataset.samples[i]["subject"] for i in train_idx_full
+    ))
+    rng = np.random.RandomState(test_subject)
+    val_subjects = set(rng.choice(train_subjects_all, size=3, replace=False))
+
+    train_idx = [i for i in train_idx_full
+                 if dataset.samples[i]["subject"] not in val_subjects]
+    val_idx   = [i for i in train_idx_full
+                 if dataset.samples[i]["subject"] in val_subjects]
 
     if len(test_idx) == 0:
         logger.warning(f"No test samples for subject {test_subject}, skipping")
         return {}
-
-    train_ds = Subset(dataset, train_idx)
-    test_ds  = Subset(dataset, test_idx)
-
-    tc = config["training"]
 
     # Check class balance in test fold
     test_labels = [dataset.samples[i]["label"] for i in test_idx]
@@ -120,24 +167,33 @@ def run_loso_fold(
         logger.warning(f"Subject {test_subject} has single class — skipping")
         return {}
 
-    # DataLoaders
-    from torch.utils.data import WeightedRandomSampler
+    train_ds = Subset(dataset, train_idx)
+    val_ds   = Subset(dataset, val_idx)
+    test_ds  = Subset(dataset, test_idx)
 
+    tc = config["training"]
+
+    # ── Class weights for loss ONLY (no WeightedRandomSampler) ──
     train_labels_arr = np.array(
         [dataset.samples[i]["label"] for i in train_idx]
     )
     classes, counts = np.unique(train_labels_arr, return_counts=True)
     wpc = 1.0 / counts.astype(float)
-    sw  = torch.tensor([wpc[l] for l in train_labels_arr], dtype=torch.float)
 
-    sampler = WeightedRandomSampler(sw, len(sw), replacement=True)
-
+    # DataLoaders
     train_loader = DataLoader(
         train_ds,
         batch_size=int(tc["batch_size"]),
-        sampler=sampler,
+        shuffle=True,
         num_workers=2,
         pin_memory=device.type == "cuda",
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=int(tc["batch_size"]),
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
     )
     test_loader = DataLoader(
         test_ds,
@@ -146,8 +202,8 @@ def run_loso_fold(
         num_workers=2,
     )
 
-    # Model
-    model = build_model(model_type, config).to(device)
+    # Model (with modality ablation)
+    model = build_model(model_type, config, modality=modality).to(device)
 
     # Loss with class weights
     w = torch.tensor(wpc / wpc.sum(), dtype=torch.float).to(device)
@@ -160,16 +216,6 @@ def run_loso_fold(
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3
-    )
-    
-    val_ds = Subset(dataset, val_idx)
-
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=int(tc["batch_size"]),
-        shuffle=False,
-        num_workers=0,
-        drop_last=False,
     )
 
     # Checkpoint path for this fold
@@ -217,102 +263,52 @@ def run_loso_fold(
                 f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
             )
 
-    # Load best and evaluate
+    # ── Load best checkpoint and evaluate ──
     model.load_state_dict(torch.load(ckpt, map_location=device))
 
-    y_val_true, _, y_val_prob = _predict(model, val_loader, device)
+    # ── Get raw validation predictions ──
+    y_val_true_raw, _, y_val_prob_raw = _predict(model, val_loader, device)
 
-    # Direction fix
-    auc_val = roc_auc_score(y_val_true, y_val_prob) if len(set(y_val_true)) > 1 else 0.5
-    if auc_val < 0.5:
+    # ── Aggregate validation predictions to video-level (matches test) ──
+    val_meta = [dataset.samples[i] for i in val_idx]
+    y_val_true, y_val_prob = _aggregate_by_video(
+        y_val_true_raw, y_val_prob_raw, val_meta
+    )
+
+    # ── Direction fix using VALIDATION ONLY (no test leakage) ──
+    auc_val = (roc_auc_score(y_val_true, y_val_prob)
+               if len(set(y_val_true)) > 1 else 0.5)
+    flip_direction = auc_val < 0.5
+
+    if flip_direction:
         y_val_prob = 1 - y_val_prob
 
-    # ── VALIDATION SMOOTHING (FIXED) ──
-    val_meta = [dataset.samples[i] for i in val_idx]
-
-    y_val_smoothed = []
-    current_group = []
-    current_meta = None
-
-    for i in range(len(y_val_prob)):
-        meta = (val_meta[i]["subject"], val_meta[i]["video"])
-
-        if current_meta is None:
-            current_meta = meta
-
-        if meta != current_meta and len(current_group) > 0:
-            chunk_smoothed = smooth_predictions(np.array(current_group))
-            y_val_smoothed.extend(chunk_smoothed)
-
-            current_group = []
-            current_meta = meta
-
-        current_group.append(y_val_prob[i])  # ← INSIDE loop (FIXED)
-
-    # last group
-    if current_group:
-        chunk_smoothed = smooth_predictions(np.array(current_group))
-        y_val_smoothed.extend(chunk_smoothed)
-
-    y_val_prob = np.array(y_val_smoothed)
-    
-
-    # Find threshold
+    # ── Threshold on aggregated validation predictions ──
     best_thresh, _ = find_best_threshold(y_val_true, y_val_prob)
-    
     best_thresh = float(np.clip(best_thresh, 0.25, 0.75))
 
+    # ── Predict on test (apply SAME flip decision) ──
     y_true, _, y_prob = _predict(model, test_loader, device)
 
-    # ── STEP 1: Direction Fix ──
-    auc = roc_auc_score(y_true, y_prob) if len(set(y_true)) > 1 else 0.5
-
-    if auc < 0.5:
+    if flip_direction:
         y_prob = 1 - y_prob
-        auc = 1 - auc
 
-    # ── STEP 2: Temporal Smoothing ──
-    y_prob_smoothed = []
+    # ── FIX 3: Video-level aggregation ──
+    test_meta = [dataset.samples[i] for i in test_idx]
+    y_true_agg, y_prob_agg = _aggregate_by_video(y_true, y_prob, test_meta)
 
-    test_indices = list(test_idx)
-    current_group = []
-    current_meta = None
+    # Apply threshold on aggregated predictions
+    y_pred_agg = (y_prob_agg > best_thresh).astype(int)
 
-    for i, idx in enumerate(test_indices):
-        sample = dataset.samples[idx]
-        meta = (sample["subject"], sample["video"])
-
-        if current_meta is None:
-            current_meta = meta
-
-        if meta != current_meta and len(current_group) > 0:
-            chunk_smoothed = smooth_predictions(np.array(current_group))
-            y_prob_smoothed.extend(chunk_smoothed)
-
-            current_group = []
-            current_meta = meta
-
-        current_group.append(y_prob[i])
-
-    # last group
-    if current_group:
-        chunk_smoothed = smooth_predictions(np.array(current_group))
-        y_prob_smoothed.extend(chunk_smoothed)
-
-    y_prob = np.array(y_prob_smoothed)
-    
-    # Apply threshold
-    y_pred = (y_prob > best_thresh).astype(int)
-
-    # ── FINAL METRICS ──
+    # ── FINAL METRICS (computed on video-level aggregated predictions) ──
     result = {
         "subject" : test_subject,
-        "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
-        "f1"      : round(float(f1_score(y_true, y_pred,
+        "accuracy": round(float(accuracy_score(y_true_agg, y_pred_agg)), 4),
+        "f1"      : round(float(f1_score(y_true_agg, y_pred_agg,
                                           average="binary",
                                           zero_division=0)), 4),
-        "roc_auc" : round(float(roc_auc_score(y_true, y_prob)
-                                 if len(set(y_true)) > 1 else 0.5), 4),
+        "roc_auc" : round(float(roc_auc_score(y_true_agg, y_prob_agg)
+                                 if len(set(y_true_agg)) > 1 else 0.5), 4),
         "n_train" : len(train_idx),
         "n_test"  : len(test_idx),
     }
@@ -325,24 +321,6 @@ def run_loso_fold(
 
     return result
 
-def find_best_threshold(y_true, y_prob):
-    if len(np.unique(y_true)) < 2:
-        return 0.5, 0
-
-    best_thresh = 0.5
-    best_f1 = 0
-
-    thresholds = np.percentile(y_prob, np.linspace(5, 95, 100))
-
-    for t in thresholds:
-        y_pred = (y_prob > t).astype(int)
-        f1 = f1_score(y_true, y_pred)
-
-        if f1 > best_f1:
-            best_f1 = f1
-            best_thresh = t
-
-    return best_thresh, best_f1
 
 # ── Full LOSO loop ────────────────────────────────────────────────────────────
 
@@ -353,6 +331,7 @@ def run_loso(
     config        : dict,
     save_dir      : str = "outputs/results",
     checkpoint_dir: str = "outputs/models",
+    modality      : str = "fusion",
 ) -> dict:
     """
     Run full 23-fold LOSO evaluation for a deep model.
@@ -362,7 +341,8 @@ def run_loso(
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(
-        f"LOSO | target={target} | model={model_type} | device={device}"
+        f"LOSO | target={target} | model={model_type} | "
+        f"modality={modality} | device={device}"
     )
 
     # Load full dataset (all subjects)
@@ -377,11 +357,13 @@ def run_loso(
 
     fold_results = []
 
-    for sub_id in range(1, 4):
+    # FIX 7: Full 23-subject LOSO
+    for sub_id in range(1, 24):
         logger.info(f"\n── LOSO Fold: Test Subject {sub_id}/23 ──")
         result = run_loso_fold(
             dataset, sub_id, model_type,
-            config, device, checkpoint_dir
+            config, device, checkpoint_dir,
+            modality=modality,
         )
         if result:
             fold_results.append(result)
@@ -394,6 +376,7 @@ def run_loso(
     summary = {
         "target"    : target,
         "model"     : model_type,
+        "modality"  : modality,
         "n_folds"   : len(fold_results),
         "acc_mean"  : round(float(np.mean(accs)), 4),
         "acc_std"   : round(float(np.std(accs)),  4),
@@ -433,6 +416,8 @@ if __name__ == "__main__":
                         choices=["valence", "arousal", "dominance"])
     parser.add_argument("--model_type", type=str, default="fusion",
                         choices=["eegnet", "cnn", "cnnlstm", "fusion"])
+    parser.add_argument("--modality",   type=str, default="fusion",
+                        choices=["eeg", "ecg", "fusion"])
     parser.add_argument("--config",     type=str,
                         default="configs/default.yaml")
     parser.add_argument("--save_dir",   type=str,
@@ -449,4 +434,5 @@ if __name__ == "__main__":
         config         = cfg,
         save_dir       = args.save_dir,
         checkpoint_dir = args.ckpt_dir,
+        modality       = args.modality,
     )

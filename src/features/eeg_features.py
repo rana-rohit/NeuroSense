@@ -4,7 +4,7 @@ from scipy.stats import entropy
 
 
 def bandpower(signal, fs, band):
-    f, Pxx = welch(signal, fs=fs, nperseg=min(len(signal), 256))
+    f, Pxx = welch(signal, fs=fs, nperseg=128)
     idx = (f >= band[0]) & (f <= band[1])
     return np.trapz(Pxx[idx], f[idx]) if idx.any() else 0.0
 
@@ -13,7 +13,7 @@ def extract_eeg_features(eeg_segment, fs=128.0):
     """
     Improved EEG features
     Input: (samples, 14)
-    Output: (~240 features)
+    Output: feature vector
     """
 
     bands = {
@@ -25,29 +25,34 @@ def extract_eeg_features(eeg_segment, fs=128.0):
 
     features = []
 
-    # ── 1. Bandpower per channel ──
-    band_feats = []
+    # ── 1. Bandpower per channel (linear + log) ──
+    linear_band_feats = []
+    log_band_feats = []
     for ch in range(eeg_segment.shape[1]):
         sig = eeg_segment[:, ch]
 
         for band in bands.values():
-            bp = bandpower(sig, fs, band)
-            band_feats.append(np.log(bp + 1e-8))  # log stability
+            bp = bandpower(sig, fs, band) + 1e-8   # linear
+            linear_band_feats.append(bp)
+            log_band_feats.append(np.log(bp))       # log for features
 
-    features.extend(band_feats)
+    features.extend(log_band_feats)
 
-    # ── 2. Relative features (VERY IMPORTANT for generalization) ──
+    # ── 2. Relative features (LINEAR bandpowers for ratios) ──
     rel_feats = []
     for ch in range(eeg_segment.shape[1]):
-        delta = band_feats[ch*4 + 0]
-        theta = band_feats[ch*4 + 1]
-        alpha = band_feats[ch*4 + 2]
-        beta  = band_feats[ch*4 + 3]
+        delta = linear_band_feats[ch*4 + 0]
+        theta = linear_band_feats[ch*4 + 1]
+        alpha = linear_band_feats[ch*4 + 2]
+        beta  = linear_band_feats[ch*4 + 3]
+        total = delta + theta + alpha + beta + 1e-8
 
         rel_feats.extend([
-            alpha / (beta + 1e-6),
-            theta / (alpha + 1e-6),
-            (alpha + theta) / (beta + 1e-6),
+            alpha / total,
+            beta / total,
+            np.log(alpha / beta),
+            np.log(theta / alpha),
+            np.log((alpha + theta) / beta),
         ])
 
     features.extend(rel_feats)
@@ -64,19 +69,20 @@ def extract_eeg_features(eeg_segment, fs=128.0):
     for ch in range(eeg_segment.shape[1]):
         sig = eeg_segment[:, ch]
 
-        hist, _ = np.histogram(sig, bins=20, density=True)
+        hist, _ = np.histogram(sig, bins=10, density=True)
         hist = hist / (np.sum(hist) + 1e-8)
         ent = entropy(hist)
         features.append(np.log(ent + 1e-8))
 
     # ── 5. Asymmetry features ──
     pairs = [(0, 13), (1, 12), (2, 11), (3, 10), (4, 9), (5, 8)]
+    pairs.append((6, 7))   # O1–O2
 
     asym_feats = []
     for (l, r) in pairs:
         for i in range(len(bands)):
-            left  = band_feats[l*4 + i]
-            right = band_feats[r*4 + i]
+            left  = log_band_feats[l*4 + i]
+            right = log_band_feats[r*4 + i]
             asym_feats.append(left - right)
 
     features.extend(asym_feats)

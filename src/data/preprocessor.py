@@ -139,6 +139,25 @@ def baseline_correction(stimuli: np.ndarray, baseline: np.ndarray) -> np.ndarray
     return (stimuli - baseline_mean).astype(np.float32)
 
 
+def normalize_with_baseline(stim: np.ndarray, base: np.ndarray,
+                            eps: float = 1e-6) -> np.ndarray:
+    """
+    Normalize stimuli signal using baseline statistics.
+    z-scores the stimuli relative to baseline mean and std.
+
+    Args:
+        stim : (samples, channels) stimuli signal (filtered)
+        base : (samples, channels) baseline signal (filtered)
+        eps  : small constant for numerical stability
+
+    Returns:
+        normalized: (samples, channels)
+    """
+    mu = base.mean(axis=0, keepdims=True)
+    sd = base.std(axis=0, keepdims=True)
+    return ((stim - mu) / (sd + eps)).astype(np.float32)
+
+
 # ── Segmentation ──────────────────────────────────────────────────────────────
 
 def segment_signal(signal: np.ndarray, fs: float,
@@ -218,24 +237,11 @@ def process_trial(eeg_stim: np.ndarray, ecg_stim: np.ndarray,
     eeg_bf = preprocess_eeg(eeg_base, fs=eeg_fs)
     ecg_bf = preprocess_ecg(ecg_base, fs=ecg_fs)
 
-    # ── NEW IMPROVED NORMALIZATION PIPELINE ──
+    # 2. Baseline-aware normalization (single pass, no double z-scoring)
+    eeg_n = normalize_with_baseline(eeg_f, eeg_bf)
+    ecg_n = normalize_with_baseline(ecg_f, ecg_bf)
 
-    # 2. Normalize baseline separately (IMPORTANT)
-    eeg_bf_n = normalize_signal(eeg_bf, method=norm_method)
-    ecg_bf_n = normalize_signal(ecg_bf, method=norm_method)
-
-    eeg_f_n  = normalize_signal(eeg_f,  method=norm_method)
-    ecg_f_n  = normalize_signal(ecg_f,  method=norm_method)
-
-    # 3. Baseline correction (on normalized signals)
-    eeg_c = baseline_correction(eeg_f_n, eeg_bf_n)
-    ecg_c = baseline_correction(ecg_f_n, ecg_bf_n)
-
-    # 4. Final normalization (stabilize)
-    eeg_n = normalize_signal(eeg_c, method=norm_method)
-    ecg_n = normalize_signal(ecg_c, method=norm_method)
-
-    # 4. Segment
+    # 3. Segment
     eeg_seg = segment_signal(eeg_n, fs=eeg_fs,
                               window_sec=window_sec, overlap_sec=overlap_sec)
     ecg_seg = segment_signal(ecg_n, fs=ecg_fs,

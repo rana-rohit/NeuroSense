@@ -221,8 +221,10 @@ class FusionModel(nn.Module):
         branch_dim     : int   = 128,
         n_classes      : int   = 2,
         dropout        : float = 0.4,
+        modality       : str   = "fusion",
     ):
         super().__init__()
+        self.modality = modality
 
         branch_cls = CNN1DBranch if branch_type == "cnn" else CNNLSTMBranch
 
@@ -261,6 +263,12 @@ class FusionModel(nn.Module):
         feat_eeg = self.eeg_branch(eeg)    # (batch, branch_dim)
         feat_ecg = self.ecg_branch(ecg)    # (batch, branch_dim)
 
+        # Modality ablation: zero out unused branch features
+        if self.modality == "eeg":
+            feat_ecg = torch.zeros_like(feat_ecg)
+        elif self.modality == "ecg":
+            feat_eeg = torch.zeros_like(feat_eeg)
+
         fused = torch.cat([feat_eeg, feat_ecg], dim=-1)   # (batch, branch_dim*2)
 
         # Attention weighting
@@ -277,12 +285,13 @@ class FusionModel(nn.Module):
 
 # ── Model factory ─────────────────────────────────────────────────────────────
 
-def build_model(model_type: str, config: dict) -> nn.Module:
+def build_model(model_type: str, config: dict, modality: str = "fusion") -> nn.Module:
     """
     Factory function — instantiate model from config.
 
     Args:
         model_type: 'eegnet' | 'cnn' | 'cnnlstm' | 'fusion'
+        modality  : 'eeg' | 'ecg' | 'fusion' (for ablation)
         config    : loaded YAML config dict
 
     Returns:
@@ -314,6 +323,7 @@ def build_model(model_type: str, config: dict) -> nn.Module:
             branch_dim=int(mc.get("branch_dim", 128)),
             n_classes=n_classes,
             dropout=dropout,
+            modality=modality,
         )
 
     elif model_type == "fusion":
@@ -324,6 +334,7 @@ def build_model(model_type: str, config: dict) -> nn.Module:
             branch_dim=int(mc.get("branch_dim", 128)),
             n_classes=n_classes,
             dropout=dropout,
+            modality=modality,
         )
 
     else:
