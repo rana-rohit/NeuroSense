@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.signal import welch
+from scipy.signal import welch, butter, filtfilt
 from scipy.stats import entropy
 
 
@@ -9,9 +9,37 @@ def bandpower(signal, fs, band):
     return np.trapz(Pxx[idx], f[idx]) if idx.any() else 0.0
 
 
+def _bandpass(signal, fs, low, high, order=4):
+    """Bandpass filter a single-channel signal for DE computation."""
+    nyq = fs / 2.0
+    low = max(low, 0.5)
+    high = min(high, nyq - 1)
+    if low >= high:
+        return signal
+    b, a = butter(order, [low / nyq, high / nyq], btype="band")
+    return filtfilt(b, a, signal)
+
+
+def differential_entropy(signal, fs, band):
+    """
+    Differential entropy of EEG in a frequency band.
+
+    For a Gaussian-distributed bandpass-filtered signal:
+        DE = 0.5 * log(2 * pi * e * variance)
+
+    This is the single most discriminative EEG feature for
+    emotion recognition in the literature (Zheng & Lu, 2015).
+    """
+    filtered = _bandpass(signal, fs, band[0], band[1])
+    var = np.var(filtered)
+    if var < 1e-12:
+        return -10.0  # floor value
+    return 0.5 * np.log(2 * np.pi * np.e * var + 1e-12)
+
+
 def extract_eeg_features(eeg_segment, fs=128.0):
     """
-    Improved EEG features
+    Improved EEG features with differential entropy.
     Input: (samples, 14)
     Output: feature vector
     """
@@ -86,6 +114,16 @@ def extract_eeg_features(eeg_segment, fs=128.0):
             asym_feats.append(left - right)
 
     features.extend(asym_feats)
+
+    # ── 6. Differential Entropy per channel per band ──
+    # DE = 0.5 * log(2πe * var(bandpass_signal))
+    # More discriminative than Shannon entropy for EEG emotion.
+    # Produces 14 channels × 4 bands = 56 features.
+    for ch in range(eeg_segment.shape[1]):
+        sig = eeg_segment[:, ch]
+        for band in bands.values():
+            de = differential_entropy(sig, fs, band)
+            features.append(de)
 
     features = np.array(features, dtype=np.float32)
 

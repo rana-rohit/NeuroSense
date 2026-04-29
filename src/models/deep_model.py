@@ -18,7 +18,13 @@ from typing import Tuple, Optional
 # ── Shared utilities ──────────────────────────────────────────────────────────
 
 class ConvBnRelu(nn.Module):
-    """Conv1d → BatchNorm → ReLU block."""
+    """Conv1d → InstanceNorm → ELU block.
+
+    Uses InstanceNorm1d instead of BatchNorm1d for better
+    cross-subject generalization: normalizes each sample
+    independently rather than using batch statistics that
+    encode training-subject amplitude distributions.
+    """
     def __init__(self, in_ch: int, out_ch: int, kernel: int,
                  stride: int = 1, padding: int = 0, groups: int = 1):
         super().__init__()
@@ -26,7 +32,7 @@ class ConvBnRelu(nn.Module):
             nn.Conv1d(in_ch, out_ch, kernel,
                       stride=stride, padding=padding,
                       groups=groups, bias=False),
-            nn.BatchNorm1d(out_ch),
+            nn.InstanceNorm1d(out_ch, affine=True),
             nn.ELU(inplace=True),
         )
 
