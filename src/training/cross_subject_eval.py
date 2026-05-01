@@ -31,8 +31,68 @@ from src.utils.logger      import get_logger
 from src.data.dataset      import DREAMERDataset
 from src.models.deep_model import build_model
 from src.training.trainer  import Trainer, _run_epoch
+from src.training.contrastive_loss import SubjectContrastiveLoss
 
 logger = get_logger("cross_subject_eval")
+
+def _run_epoch_loso(model, loader, criterion, optimizer, device, is_train, epoch=1, contrastive_fn=None):
+    model.train() if is_train else model.eval()
+    total_loss, total_ce, total_cl = 0.0, 0.0, 0.0
+    correct, total = 0, 0
+    ctx = torch.enable_grad() if is_train else torch.no_grad()
+    
+    avg_eeg_attn, avg_ecg_attn = 0.0, 0.0
+
+    with ctx:
+        for batch in loader:
+            eeg, ecg, labels = batch[0].to(device), batch[1].to(device), batch[2].to(device)
+            subjects = batch[3].to(device) if len(batch) > 3 else None
+
+            if is_train: optimizer.zero_grad()
+
+            logits = model(eeg, ecg) if hasattr(model, "ecg_branch") else model(eeg)
+            ce_loss = criterion(logits, labels)
+            loss = ce_loss
+            cl_loss_val = 0.0
+
+            # Contrastive Loss Warmup Strategy (Epochs 6+)
+            if is_train and contrastive_fn and hasattr(model, "extract_embedding") and epoch >= 6:
+                embeddings = model.extract_embedding(eeg, ecg)
+                cl_loss = contrastive_fn(embeddings, labels, subjects)
+                loss = ce_loss + 0.1 * cl_loss
+                cl_loss_val = cl_loss.item()
+                
+            # Log attention weights if available
+            if hasattr(model, "attention"):
+                with torch.no_grad():
+                    fused = model.extract_embedding(eeg, ecg)
+                    attn = model.attention(fused).mean(dim=0)
+                    avg_eeg_attn += attn[0].item() * labels.size(0)
+                    avg_ecg_attn += attn[1].item() * labels.size(0)
+
+            if is_train:
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+
+            total_loss += loss.item() * labels.size(0)
+            total_ce += ce_loss.item() * labels.size(0)
+            total_cl += cl_loss_val * labels.size(0)
+            
+            preds = logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+            
+    metrics = {
+        "loss": total_loss / total,
+        "acc": correct / total,
+        "ce_loss": total_ce / total,
+        "cl_loss": total_cl / total,
+        "attn_eeg": avg_eeg_attn / total if hasattr(model, "attention") else 0.0,
+        "attn_ecg": avg_ecg_attn / total if hasattr(model, "attention") else 0.0,
+    }
+
+    return metrics
 
 # ── LOSO split indices ────────────────────────────────────────────────────────
 
@@ -66,8 +126,8 @@ def _predict(model, loader, device):
     all_probs = []
     all_labels = []
 
-    for eeg, ecg, labels in loader:
-        eeg, ecg = eeg.to(device), ecg.to(device)
+    for batch in loader:
+        eeg, ecg, labels = batch[0].to(device), batch[1].to(device), batch[2]
 
         logits = model(eeg, ecg) if hasattr(model, "ecg_branch") else model(eeg)
         probs = torch.softmax(logits, dim=1)[:, 1]
@@ -230,17 +290,21 @@ def run_loso_fold(
     patience = int(tc.get("patience", 10))
     epochs   = int(tc["epochs"])
 
+    contrastive_fn = SubjectContrastiveLoss(temperature=0.1)
+
     for epoch in range(1, epochs + 1):
-        tr_loss, tr_acc = _run_epoch(
+        tr_metrics = _run_epoch_loso(
             model, train_loader, criterion,
-            optimizer, device, is_train=True
+            optimizer, device, is_train=True,
+            epoch=epoch, contrastive_fn=contrastive_fn
         )
 
-        val_loss, val_acc = _run_epoch(
+        val_metrics = _run_epoch_loso(
             model, val_loader, criterion,
             None, device, is_train=False
         )
 
+        val_loss = val_metrics["loss"]
         scheduler.step(val_loss)
 
         if val_loss < best_loss - 1e-4:
@@ -259,8 +323,9 @@ def run_loso_fold(
         if epoch % 10 == 0:
             logger.info(
                 f"  Sub {test_subject:02d} | Ep {epoch:03d} | "
-                f"train_loss={tr_loss:.4f} train_acc={tr_acc:.4f} | "
-                f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
+                f"tr_loss={tr_metrics['loss']:.4f} tr_acc={tr_metrics['acc']:.4f} cl_loss={tr_metrics['cl_loss']:.4f} | "
+                f"val_loss={val_loss:.4f} val_acc={val_metrics['acc']:.4f} | "
+                f"Attn(EEG/ECG)={tr_metrics['attn_eeg']:.2f}/{tr_metrics['attn_ecg']:.2f}"
             )
 
     # ── Load best checkpoint and evaluate ──
