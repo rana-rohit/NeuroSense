@@ -17,20 +17,29 @@ intelligence platform. The model is one component within a larger system that:
 - Generates behavioural insights (trends, anomalies, peaks, correlations)
 - Tracks per-user emotional baselines over time
 
+### ✨ Recent Evaluation & Pipeline Upgrades
+The ML pipeline has been rigorously upgraded to ensure strict, leakage-free evaluation:
+- **Leakage-Free LOSO**: Full 23-subject Leave-One-Subject-Out evaluation. Flip decisions are strictly based on validation predictions.
+- **Subject-Level Validation**: Deterministic but randomized validation split ensuring no subject-level or window-level overlap between train, val, and test sets.
+- **Video-Level Aggregation**: Metrics are computed on video-level aggregated predictions (mean probability) rather than isolated, overlapping windows, ensuring realistic performance reporting.
+- **Baseline-Aware Preprocessing**: Improved single-pass normalization preserving crucial signal amplitude information instead of destroying it via double z-scoring.
+- **Advanced Feature Engineering**: Mathematically sound feature pipelines using linear bandpower for ratios and log-bandpower for absolute features and asymmetry (now including the O1-O2 pair).
+- **Modality Ablation**: Built-in CLI support for training `eeg` only, `ecg` only, or `fusion` models.
+
 ---
 
 ## System Flow
 
-```
-Signal Input → Quality Check → Preprocess → Inference → Aggregate
-     → Store (SQLite) → Generate Insights → API Response
+```text
+Signal Input → Quality Check → Baseline-Aware Preprocess → Inference
+     → Aggregate → Store (SQLite) → Generate Insights → API Response
 ```
 
 ---
 
 ## Project Structure
 
-```
+```text
 emotion-recognition/
 ├── src/
 │   ├── schemas/          # Pydantic data contracts
@@ -40,8 +49,8 @@ emotion-recognition/
 │   ├── api/              # FastAPI REST endpoints
 │   ├── data/             # DREAMER loader, preprocessor, datasets
 │   ├── features/         # EEG (258-dim) + ECG (22-dim) features
-│   ├── models/           # Baseline ML + deep learning models
-│   ├── training/         # Trainer, evaluator, LOSO, tuner
+│   ├── models/           # Baseline ML + deep learning models (EEGNet, Fusion)
+│   ├── training/         # Trainer, evaluator, LOSO loop, tuner
 │   ├── inference/        # Standalone predictor
 │   └── utils/            # Config, logger
 ├── notebooks/
@@ -73,20 +82,23 @@ cd emotion-recognition
 pip install -r requirements_platform.txt
 ```
 
-### 2. Preprocess data (run once)
+### 2. Evaluate Models (Full LOSO)
+Run the fully calibrated, leakage-free LOSO evaluation pipeline across all 23 subjects:
 ```bash
-python src/data/save_processed.py --config configs/default.yaml
+python src/training/cross_subject_eval.py \
+    --target valence \
+    --model_type fusion \
+    --modality fusion \
+    --config configs/default.yaml
 ```
+*(You can test modality ablation by swapping `--modality` with `eeg` or `ecg`)*
 
-### 3. Train models
-Open `notebooks/experiments/02_train_colab.ipynb` on Google Colab.
-
-### 4. Start the platform API
+### 3. Start the Platform API
 ```bash
 # Without models (health endpoint only)
 uvicorn src.api.routes:app --reload --port 8000
 
-# With models
+# With models (Requires pre-trained weights)
 python -c "
 from src.api.routes import create_app
 import uvicorn
@@ -99,7 +111,7 @@ uvicorn.run(app, host='0.0.0.0', port=8000)
 "
 ```
 
-### 5. Open Swagger UI
+### 4. Open Swagger UI
 ```
 http://localhost:8000/docs
 ```
@@ -158,21 +170,6 @@ docker-compose up
 
 ---
 
-## Running Tests
-
-```bash
-# Unit tests
-pytest tests/ -v
-
-# Integration tests (no models needed)
-pytest tests/integration/test_platform.py -v
-
-# All tests
-make test-all
-```
-
----
-
 ## Dataset
 
 DREAMER — 23 subjects, 18 film clips, EEG (14ch @ 128Hz) + ECG (2ch @ 256Hz).
@@ -183,11 +180,13 @@ Request access: [Zenodo](https://zenodo.org/records/546113)
 
 ## Models
 
-| Model | Type | Input | LOSO AUC |
-|-------|------|-------|----------|
-| Random Forest | Classical ML | 280 features | ~0.65-0.70 |
-| FusionModel (CNNLSTM) | Deep | EEG + ECG | ~0.68-0.75 |
-| Tuned FusionModel | Deep + Optuna | EEG + ECG | ~0.72-0.78 |
+The system evaluates models using robust Leave-One-Subject-Out (LOSO) cross-validation with video-level metric aggregation and disjoint, subject-level train/validation sets. Double-balancing artifacts have been removed, relying purely on weighted loss for imbalanced datasets.
+
+| Model | Type | Input | Feature Dimension |
+|-------|------|-------|-------------------|
+| Random Forest | Classical ML | EEG + ECG | ~280 |
+| FusionModel (CNNLSTM) | Deep Late-Fusion | EEG + ECG | Temporal CNN+LSTM |
+| EEGNet | Deep Spatial-Temporal | EEG | Spatial/Temporal Convs |
 
 ---
 
