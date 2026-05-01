@@ -198,7 +198,7 @@ class CNNLSTMBranch(nn.Module):
         x = self.cnn(x)                        # (batch, 64, T')
         x = x.permute(0, 2, 1)                 # (batch, T', 64)
         out, _ = self.lstm(x)
-        x = out[:, -1, :]                       # last timestep
+        x = out.mean(dim=1)                    # Use temporal mean pooling
         return self.head(x)
 
 
@@ -231,6 +231,7 @@ class FusionModel(nn.Module):
     ):
         super().__init__()
         self.modality = modality
+        self.branch_dim = branch_dim
 
         branch_cls = CNN1DBranch if branch_type == "cnn" else CNNLSTMBranch
 
@@ -255,14 +256,9 @@ class FusionModel(nn.Module):
             nn.Linear(64, n_classes),
         )
 
-    def forward(self, eeg: torch.Tensor,
-                ecg: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            eeg: (batch, eeg_time, 14)  — time-first from DataLoader
-            ecg: (batch, ecg_time, 2)
-        """
-        # Transpose to (batch, channels, time) for Conv1d
+    def extract_embedding(self, eeg: torch.Tensor,
+                          ecg: torch.Tensor) -> torch.Tensor:
+        """Extract fused embeddings before the classifier head."""
         eeg = eeg.transpose(1, 2)          # (batch, 14, eeg_time)
         ecg = ecg.transpose(1, 2)          # (batch, 2,  ecg_time)
 
@@ -276,17 +272,28 @@ class FusionModel(nn.Module):
             feat_eeg = torch.zeros_like(feat_eeg)
 
         fused = torch.cat([feat_eeg, feat_ecg], dim=-1)   # (batch, branch_dim*2)
+        return fused
+
+    def forward(self, eeg: torch.Tensor,
+                ecg: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            eeg: (batch, eeg_time, 14)  — time-first from DataLoader
+            ecg: (batch, ecg_time, 2)
+        """
+        fused = self.extract_embedding(eeg, ecg)
 
         # Attention weighting
-        attn   = self.attention(fused)                     # (batch, 2)
-        w_eeg  = attn[:, 0:1]
-        w_ecg  = attn[:, 1:2]
-        fused  = torch.cat([
-            feat_eeg * w_eeg,
-            feat_ecg * w_ecg,
+        attn = self.attention(fused)
+        w_eeg = attn[:, 0:1]
+        w_ecg = attn[:, 1:2]
+
+        weighted = torch.cat([
+            fused[:, :self.branch_dim] * w_eeg,
+            fused[:, self.branch_dim:] * w_ecg
         ], dim=-1)
 
-        return self.classifier(fused)
+        return self.classifier(weighted)
 
 
 # ── Model factory ─────────────────────────────────────────────────────────────
