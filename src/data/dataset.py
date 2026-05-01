@@ -121,12 +121,13 @@ class DREAMERDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         s = self.samples[idx]
         eeg   = torch.from_numpy(s["eeg"]).float()    # (win_eeg, 14)
         ecg   = torch.from_numpy(s["ecg"]).float()    # (win_ecg, 2)
         label = torch.tensor(s["label"], dtype=torch.long)
-        return eeg, ecg, label
+        subject = torch.tensor(s["subject"], dtype=torch.long)
+        return eeg, ecg, label, subject
 
     def class_weights(self) -> torch.Tensor:
         """Compute inverse-frequency class weights for imbalanced data."""
